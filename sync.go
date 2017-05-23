@@ -196,7 +196,7 @@ func (sync *Synchronizer) CreateTable(i int, name string, table Table) {
 		"table":    name,
 	})
 
-	createSQL := "CREATE TABLE " + name + " "
+	createSQL := "CREATE TABLE IF NOT EXISTS " + name + " "
 	if len(table.Columns) != 0 {
 		var typesSQL []string
 		for columnName, columnType := range table.Columns {
@@ -236,9 +236,9 @@ func (sync *Synchronizer) CreateView(i int, name string, view Table) {
 
 	var createSQL string
 	if view.Materialized {
-		createSQL = "CREATE MATERIALIZED VIEW "
+		createSQL = "CREATE MATERIALIZED VIEW IF NOT EXISTS "
 	} else {
-		createSQL = "CREATE VIEW "
+		createSQL = "CREATE VIEW IF NOT EXISTS "
 	}
 
 	createSQL += name + " "
@@ -344,16 +344,16 @@ func (sync *Synchronizer) DropColumn(i int, name, columnName string) {
 }
 
 func (sync *Synchronizer) CheckTable(name string, table Table) {
-	r := sync.Query("SELECT name, type FROM system.columns WHERE database = ? AND table = ?", sync.database, name)
-	if r.HasError() {
-		panic(r)
-	}
-	defer r.Close()
-
 	l := log.WithFields(log.Fields{
 		"database": sync.database,
 		"table":    name,
 	})
+
+	r := sync.Query("SELECT name, type FROM system.columns WHERE database = ? AND table = ?", sync.database, name)
+	if r.HasError() {
+		l.Error(r.Error())
+	}
+	defer r.Close()
 
 	for i, e := range r {
 		l = l.WithField("host", sync.config.Servers[i].Host)
@@ -361,7 +361,7 @@ func (sync *Synchronizer) CheckTable(name string, table Table) {
 		exists := false
 		existColumns := make(map[string]bool)
 
-		for e.Rows.Next() {
+		for e.Rows != nil && e.Rows.Next() {
 			exists = true
 
 			var columnName, columnType, needType string
@@ -378,7 +378,7 @@ func (sync *Synchronizer) CheckTable(name string, table Table) {
 				l.WithField("column", columnName).Error("Table has excess column")
 
 				if sync.fix && sync.dropColumns {
-					sync.DropColumn(i, name, columnName)
+					go sync.DropColumn(i, name, columnName)
 				}
 				continue
 			}
@@ -392,7 +392,7 @@ func (sync *Synchronizer) CheckTable(name string, table Table) {
 				}).Error("Column type mismatch")
 
 				if sync.fix {
-					sync.ModifyColumn(i, name, columnName, needType)
+					go sync.ModifyColumn(i, name, columnName, needType)
 				}
 			}
 		}
@@ -402,9 +402,9 @@ func (sync *Synchronizer) CheckTable(name string, table Table) {
 
 			if sync.fix {
 				if table.View {
-					sync.CreateView(i, name, table)
+					go sync.CreateView(i, name, table)
 				} else {
-					sync.CreateTable(i, name, table)
+					go sync.CreateTable(i, name, table)
 				}
 			}
 
@@ -419,7 +419,7 @@ func (sync *Synchronizer) CheckTable(name string, table Table) {
 			l.WithField("column", columnName).Error("Table has not enough columns")
 
 			if sync.fix {
-				sync.AddColumn(i, name, columnName, needType)
+				go sync.AddColumn(i, name, columnName, needType)
 			}
 		}
 	}
